@@ -1,0 +1,434 @@
+
+(* These Specificaton of MQTT protocol are written by Mabrouk. *)
+
+(*   Header  *)
+algorithm MQTTSpecs
+extends Sequences, Naturals, TLC, FiniteSets
+
+(*  Declaration Section  *)
+
+variable  
+
+    network = [p \in Broker \cup Publisher \cup Subscriber  |-> <<>>],
+	activeClients = {},
+	sessionClients = {},
+	idtopic=1,
+RetainedMessages = {},
+pk = FALSE,
+	Topics = {"A", "B", "C"},
+	TopicPool = [t \in Topics |-> {}]
+
+(*	TopicPool = [t \in Topics |-> CASE (t = "A") -> {3,4}] *)
+
+
+
+
+definition send(ch, msg) ==
+  [network EXCEPT ![ch] = Append(@, msg)]
+
+procedure respondPUBREL(pkt)
+	begin
+		if ({pkt.sender} \cap activeClients) # {} then
+			network := send(pkt.sender, [type |-> "PUBCOMP", sender |-> self, topic |-> "A", QoS |-> 2]);							
+		end if;
+	end procedure
+procedure waitpubrel(pkt)
+variable PUBRECE = FALSE
+	begin
+		when Len(network[self]) > 0;
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+		if packet.type = "PUBREL" then
+			network := send(pkt.sender, [type |-> "PUBCOMP", sender |-> self, topic |-> "A", QoS |-> 2]);
+				PUBRECE := TRUE;
+			network[self] := Tail(network[self]);
+		end if;		
+		end with;
+	end procedure	
+procedure respondPUBREC(pkt)
+	begin
+		if  ({pkt.sender} \cap activeClients) # {} then
+			network := send(pkt.sender, [type |-> "PUBREL", sender |-> self, topic |-> "A", QoS |-> 2]);							
+		end if;
+	end procedure
+
+procedure publishsub(pkt)
+	begin
+		if TopicPool[pkt.topic] # {} then
+		for sub \in TopicPool[pkt.topic]
+network := send(sub, [type |-> "PUBLISH", sender |-> self, topic |-> pkt.topic, QoS |-> 2, retain |-> 0, payload|-> "bonjour", responsetopic |-> pkt.topic, correlationdata |-> "bonjour"]);
+		end for;
+		end if;
+	end procedure
+
+procedure publishwill(pkt) 
+	begin
+      if TopicPool[pkt.willtopic] # {} then
+      for sub \in TopicPool[pkt.willtopic]
+	if pkt.keepalive = 0 then
+ network := send(sub, [type |-> "PUBLISH", sender |-> self, topic |-> pkt.willtopic, QoS |-> pkt.willqos, retain |-> pkt.willretain, payload|-> pkt.willpayload, responsetopic |-> pkt.willtopic, correlationdata |-> pkt.willpayload]);  
+       pk := TRUE;
+	end if;
+		end for;
+		end if;
+	end procedure
+
+
+procedure publishretain(pkt)
+	begin
+		if TopicPool[pkt.topic] # {} then
+		for sub \in RetainedMessages
+		if sub =pkt.topic then
+	 network := send(pkt.sender, [type |-> "PUBLISH", sender |-> self, topic |-> pkt.topic, QoS |-> pkt.QoS, retain |-> 0, payload|-> "bonjour", responsetopic |-> pkt.topic, CorrelationData |-> "bonjour"]);
+		end if;
+		end for;
+		end if;
+	end procedure
+
+procedure respondPINGREQ(pkt)
+	begin
+		if ({pkt.sender} \cap activeClients) # {} then
+			network := send(pkt.sender, [type |-> "PINGRESP", sender |-> self]);							
+		end if;
+	end procedure
+
+procedure commenceQoS2(to)
+variable PUBSUCC = FALSE
+begin
+(*	print "Commencing ..... ";*)
+cqos2:
+	loop
+		network := send(to, [type |-> "PUBLISH", sender |-> self, topic |-> "A", QoS |-> 2, retain |-> 0, payload|-> "bonjour", responsetopic |-> "A", correlationdata |-> "bonjour"]);
+		
+waitPUB2:	
+		when Len(network[self]) > 0;
+		
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "PUBREC" then
+				network := send(to, [type |-> "PUBREL", sender |-> self, topic |-> "A", QoS |-> 2]);
+								network[self] := Tail(network[self]);
+			end if;
+		end with;
+		
+waitPUBCOMP2:		
+		when Len(network[self]) > 0;
+		
+		with pkt = Head(network[self])		(* handle message at the head of the message queue *)
+			if pkt.type = "PUBCOMP" then
+				PUBSUCC := TRUE;
+				network[self] := Tail(network[self]);
+			end if;
+		end with;
+		
+		(* Break the loop if publish has been successfully completed *)
+		if PUBSUCC = TRUE then 
+			break;
+		end if;
+	end loop;
+
+end procedure
+		
+process Broker[1]
+		variable
+			rules = 0, status = 0, statusRecord = 0,
+			wait_REL = {}, wait_COMP = {}
+
+		procedure publish(pkt)
+		begin
+l1:			branch
+				pkt.QoS = 0 then
+					if TopicPool[pkt.topic] # {} then
+					for sub \in TopicPool[pkt.topic]
+					network := send(sub, [type |-> "PUBLISH", sender |-> self, topic |-> pkt.topic, QoS |-> 0, retain |-> 1, payload|-> "bonjour", responsetopic |-> "A", correlationdata |-> "bonjour"]);
+					end for;
+					end if;
+			or
+				pkt.QoS = 1 then
+					if TopicPool[pkt.topic] # {} then
+					network := send(pkt.sender, [type |-> "PUBACK", sender |-> self, topic |-> pkt.topic, QoS |-> 1]);
+					for sub \in TopicPool[pkt.topic]
+					network := send(sub, [type |-> "PUBLISH", sender |-> self, topic |-> pkt.topic, QoS |-> 1, retain |-> 0, payload|-> "bonjour", responsetopic |-> "A", correlationdata |-> "bonjour"]);
+					end for;
+					end if;
+			end branch;
+		end procedure
+			
+		begin
+		
+listen:
+			loop
+				if Len(network[self]) > 0 then
+									    
+				    with packet = Head(network[self])		(* handle message at the head of the message queue *)
+						branch
+							packet.type = "CONNECT" then
+							if packet.session = 1 then		
+							sessionClients := sessionClients \cup {packet.sender};
+							end if;
+								activeClients := activeClients \cup {packet.sender};
+								network := send(packet.sender, [type |-> "CONNACK", sender |-> self]);	
+                                                               	publishwill(packet);
+							network[self] := Tail(network[self]);
+						or
+							packet.type = "SUBSCRIBE" then
+							   if ({packet.sender} \cap activeClients) # {} then
+								TopicPool[packet.topic] := TopicPool[packet.topic] \cup {packet.sender};
+								network := send(packet.sender, [type |-> "SUBACK", sender |-> self]);	
+							publishretain(packet);
+							network[self] := Tail(network[self]);
+								end if;
+							
+						or
+							packet.type = "PUBLISH" then
+							if packet.retain = 1 then
+								RetainedMessages := RetainedMessages \cup {packet.topic};
+        						end if;
+							if packet.responsetopic # packet.topic then 
+							network := send(idtopic, [type |-> "PUBLISH", sender |-> self, topic |-> packet.responsetopic, QoS |-> packet.QoS, retain |-> packet.retain, payload|-> packet.correlationdata, responsetopic |-> packet.responsetopic, correlationdata |-> packet.correlationdata]);	                                   
+							end if;
+							publish(packet);
+								network[self] := Tail(network[self]);				
+						or
+							packet.type = "PUBACK" then
+							(* Receives ACK for QoS 1 *)
+								network[self] := Tail(network[self]);
+						or
+							packet.type = "PUBREC" then
+                                               network := send(packet.sender, [type |-> "PUBREL", sender |-> self, topic |-> "A", QoS |-> 2]);	
+								wait_COMP := wait_COMP \cup {packet.sender};
+								network[self] := Tail(network[self]);
+						or
+							packet.type = "PUBCOMP" then
+								if ({packet.sender} \cap wait_COMP) # {} then
+									wait_COMP := wait_COMP \ {packet.sender};	
+								network[self] := Tail(network[self]);
+								end if;
+						or
+							packet.type = "PUBREL" then
+								if ({packet.sender} \cap wait_REL) # {} then
+									wait_REL := wait_REL \ {packet.sender};
+						network := send(packet.sender, [type |-> "PUBCOMP", sender |-> self, topic |-> packet.topic, QoS |-> 2]);
+								end if;
+								publishsub(packet);
+							network[self] := Tail(network[self]);
+      
+						or
+							packet.type = "UNSUBSCRIBE" then
+								if ({packet.sender} \cap activeClients) # {}  then
+									TopicPool[packet.topic] := TopicPool[packet.topic] \ {packet.sender};
+									network := send(packet.sender, [type |-> "UNSUBACK", sender |-> self]);
+									network[self] := Tail(network[self]);
+								end if;
+						
+							(* Receives from subscriber, must send PUBREL to subscriber and receive PUBCOMP *)
+						or
+							packet.type = "PINGREQ" then
+								respondPINGREQ(packet);
+								network[self] := Tail(network[self]);
+						or
+							packet.type = "DISCONNECT" then
+								activeClients := activeClients \ {packet.sender};
+								network[self] := Tail(network[self]);
+						end branch;
+						
+			        end with;
+				   
+				   end if;
+			end loop;
+			
+			
+		end process
+
+process Publisher[1]
+	variable
+		CONNSUCC = FALSE, PUBSUCC = FALSE, BrokerID = 1
+	begin
+PubStart:	
+	(* BrokerID := BrokerID \in Broker; *)
+	loop
+network := send(BrokerID, [type |-> "CONNECT", sender |-> self, willflag |-> 1, willqos |-> 0, willretain |-> 1, session |-> 0, keepalive |-> 60, willpayload |-> "bonjour", willtopic |-> "A"]);
+	
+waitCONN:
+		when Len(network[self]) > 0;
+
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "CONNACK" then
+				CONNSUCC := TRUE;
+				network[self] := Tail(network[self]);
+			end if;
+		end with;
+		
+		(* Break the loop if the connection has been successfully made *)
+		if CONNSUCC = TRUE then 
+			break;
+		end if;
+	end loop;
+	
+	
+tryPUBLISH:
+	branch
+	TRUE then
+	(* Publish with QoS = 0 *)
+lbl:	network := send(BrokerID, [type |-> "PUBLISH", sender |-> self, topic |-> "A", QoS |-> 0, retain |-> 0, payload|-> "bonjour", responsetopic |-> "A", correlationdata |-> "bonjour"]);
+	
+
+or
+	TRUE then
+	(* Publish with QoS = 1 *)
+
+tryPUB1:
+	
+	loop
+		network := send(BrokerID, [type |-> "PUBLISH", sender |-> self, topic |-> "A", QoS |-> 1, retain |-> 0, payload|-> "bonjour", responsetopic |-> "A", correlationdata |-> "bonjour"]);
+waitPUB1:
+		when Len(network[self]) > 0;
+		
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "PUBACK" then
+				PUBSUCC := TRUE;
+			network[self] := Tail(network[self]);
+			end if;
+		end with;
+		
+		(* Break the loop if publish has been successfully completed *)
+		if PUBSUCC = TRUE then 
+			break;
+		end if;
+	end loop;
+end branch;
+
+network := send(BrokerID, [type |-> "PINGREQ", sender |-> self]);
+
+network := send(BrokerID, [type |-> "DISCONNECT", sender |-> self]);
+	end process
+
+process Subscriber[1]
+	variable
+		rules = 0, BrokerID = 1, SUBSUCC = FALSE, CONNSUCC = FALSE, PUBRECE = FALSE, UNSUBSUCC = FALSE, INJ2= FALSE
+begin
+	
+Sub_start:	
+	(* BrokerID := BrokerID \in Broker; *)
+	loop
+network := send(BrokerID, [type |-> "CONNECT", sender |-> self, willflag |-> 1, willqos |-> 0, willretain |-> 1, session |-> 1, keepalive |-> 60, willpayload |-> "bonjour", willtopic |-> "A"]);
+
+		
+Sub_waitCONN:
+		when Len(network[self]) > 0;
+
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "CONNACK" then
+				CONNSUCC := TRUE;
+			network[self] := Tail(network[self]);
+			end if;
+		end with;
+		
+		(* Break the loop if the connection has been successfully made *)
+		if CONNSUCC = TRUE then 
+			break;
+		end if;
+	end loop;
+
+	
+Sub_subscription:
+	branch
+TRUE then
+	(* subscribe with QoS = 0 *)
+sub0: 
+       network := send(BrokerID, [type |-> "SUBSCRIBE", sender |-> self, topic |-> "A", QoS |-> 0]);
+or  
+	TRUE then
+	(*  subscribe with QoS = 1 *)
+sub1: 
+	network := send(BrokerID, [type |-> "SUBSCRIBE", sender |-> self, topic |-> "A", QoS |-> 1]);
+
+end branch;
+
+Sub_waitsubscription:
+loop
+		when Len(network[self]) > 0;
+
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "SUBACK" then
+				SUBSUCC := TRUE;
+			network[self] := Tail(network[self]);
+			end if;
+		end with;
+		(* Break the loop if the subscription has been successfully made *)
+		if SUBSUCC = TRUE then 
+			break;
+		end if;
+	end loop;
+
+Sub_listen:
+			loop
+				when Len(network[self]) > 0;
+				 with packet = Head(network[self])		
+						if packet.type = "PUBLISH" then
+							if packet.QoS =0 then
+								PUBRECE := TRUE;
+								network[self] := Tail(network[self]);
+							end if ;
+							if packet.QoS =1 then
+							network := send(packet.sender, [type |-> "PUBACK", sender |-> self, topic |-> "A", QoS |-> 1]);
+								PUBRECE := TRUE;
+								network[self] := Tail(network[self]);
+							end if ;
+							
+							if pk = TRUE then
+						        INJ2 := TRUE;
+						       end if;
+						end if;
+			        end with;
+
+if PUBRECE = TRUE then 
+			break;
+		end if;
+
+			end loop;
+
+unSub_subscription:
+
+		network := send(BrokerID, [type |-> "UNSUBSCRIBE", topic |-> "A", sender |-> self]);
+
+unSub_waitsubscription:
+		when Len(network[self]) > 0;
+
+		with packet = Head(network[self])		(* handle message at the head of the message queue *)
+			if packet.type = "UNSUBACK" then
+				UNSUBSUCC := TRUE;
+			network[self] := Tail(network[self]);
+			end if;
+		end with;
+		(* Break the loop if the subscription has been successfully made *)
+		if UNSUBSUCC = TRUE then 
+			break;
+		end if;
+pingreq:
+network := send(BrokerID, [type |-> "PINGREQ", sender |-> self]);
+Disconnectsub:
+	network := send(BrokerID, [type |-> "DISCONNECT", sender |-> self]);
+	end process
+
+process attaque[1]
+variable
+		BrokerID = 1, OBS= FALSE, INJ= FALSE, pk = 1
+	begin
+PUBACK:
+loop
+    when Len(network[BrokerID]) > 0;
+		with packet = Head(network[BrokerID])
+			if packet.type = "PUBACK" then
+                   network[BrokerID] := Tail(network[BrokerID]);
+                     OBS := TRUE;
+ 	network := send(BrokerID, [type |-> "PUBACK", sender |-> packet.sender, topic |-> packet.topic, QoS |-> packet.QoS]);
+                      pk := packet.sender;
+			INJ := TRUE;
+			end if;
+	end with;
+if INJ = TRUE then 
+	break;
+		end if;
+end loop;
+end process
+end algorithm
+temporal ~ (\A I \in attaque : <>( I.OBS = TRUE => I.INJ = TRUE))
